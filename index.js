@@ -4,7 +4,10 @@ const {
   UserInputError,
   AuthenticationError,
   gql,
-} = require('apollo-server');
+} = require('apollo-server-express');
+const { ApolloServerPluginDrainHttpServer } = require('apollo-server-core');
+const express = require('express');
+const http = require('http');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const Book = require('./models/book');
@@ -145,22 +148,42 @@ const resolvers = {
   },
 };
 
-const server = new ApolloServer({
-  typeDefs,
-  resolvers,
-  context: async ({ req }) => {
-    const auth = req ? req.headers.authorization : null;
-    if (auth && auth.startsWith('Bearer ')) {
-      const tokenPayload = jwt.verify(
-        auth.substring(7),
-        process.env.JWT_SECRET
-      );
-      const currentUser = await User.findById(tokenPayload.id);
-      return { currentUser };
-    }
-  },
-});
+async function startApolloServer(typeDefs, resolvers) {
+  // Required logic for integrating with Express
+  const app = express();
+  const httpServer = http.createServer(app);
 
-server.listen().then(({ url }) => {
-  console.log(`Server ready at ${url}`);
-});
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers,
+    plugins: [ApolloServerPluginDrainHttpServer({ httpServer })],
+    context: async ({ req }) => {
+      const auth = req ? req.headers.authorization : null;
+      if (auth && auth.startsWith('Bearer ')) {
+        const tokenPayload = jwt.verify(
+          auth.substring(7),
+          process.env.JWT_SECRET
+        );
+        const currentUser = await User.findById(tokenPayload.id);
+        return { currentUser };
+      }
+    },
+  });
+
+  // More required logic for integrating with Express
+  await server.start();
+  server.applyMiddleware({
+    app,
+
+    // By default, apollo-server hosts its GraphQL endpoint at the
+    // server root. However, *other* Apollo Server packages host it at
+    // /graphql. Optionally provide this to match apollo-server.
+    path: '/',
+  });
+
+  // Modified server startup
+  await new Promise((resolve) => httpServer.listen({ port: 4000 }, resolve));
+  console.log(`🚀 Server ready at http://localhost:4000${server.graphqlPath}`);
+}
+
+startApolloServer(typeDefs, resolvers);
