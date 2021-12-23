@@ -25,6 +25,7 @@ mongoose
   })
   .then(() => console.log('connected to MongoDb'))
   .catch((error) => console.log('error connecting to MongoDB:', error.message));
+mongoose.set('debug', true);
 
 const pubsub = new PubSub();
 
@@ -85,9 +86,6 @@ const resolvers = {
       return book.author;
     },
   },
-  Author: {
-    bookCount: async (root) => await Book.countDocuments({ author: root.id }),
-  },
   Query: {
     bookCount: async () => await Book.collection.countDocuments(),
     authorCount: async () => await Author.collection.countDocuments(),
@@ -112,6 +110,8 @@ const resolvers = {
       }
       try {
         const book = await Book.create({ ...args, author });
+        author.bookCount += 1;
+        author.save();
         pubsub.publish('BOOK_ADDED', { bookAdded: book });
         return book;
       } catch (error) {
