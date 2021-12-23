@@ -8,6 +8,10 @@ const {
 const { ApolloServerPluginDrainHttpServer } = require('apollo-server-core');
 const express = require('express');
 const http = require('http');
+const { execute, subscribe } = require('graphql');
+const { SubscriptionServer } = require('subscriptions-transport-ws');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
+const { PubSub } = require('graphql-subscriptions');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const Book = require('./models/book');
@@ -21,6 +25,8 @@ mongoose
   })
   .then(() => console.log('connected to MongoDb'))
   .catch((error) => console.log('error connecting to MongoDB:', error.message));
+
+const pubsub = new PubSub();
 
 const typeDefs = gql`
   type Book {
@@ -66,6 +72,10 @@ const typeDefs = gql`
     allAuthors: [Author!]!
     me: User
   }
+
+  type Subscription {
+    bookAdded: Book!
+  }
 `;
 
 const resolvers = {
@@ -101,7 +111,9 @@ const resolvers = {
         author = await Author.create({ name: args.author });
       }
       try {
-        return await Book.create({ ...args, author });
+        const book = await Book.create({ ...args, author });
+        pubsub.publish('BOOK_ADDED', { bookAdded: book });
+        return book;
       } catch (error) {
         throw new UserInputError(error.message, {
           invalidArgs: args,
@@ -146,17 +158,50 @@ const resolvers = {
       return { value: jwt.sign(tokenPayload, process.env.JWT_SECRET) };
     },
   },
+  Subscription: {
+    bookAdded: {
+      subscribe: () => pubsub.asyncIterator(['BOOK_ADDED']),
+    },
+  },
 };
 
 async function startApolloServer(typeDefs, resolvers) {
   // Required logic for integrating with Express
   const app = express();
   const httpServer = http.createServer(app);
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+
+  const subscriptionServer = SubscriptionServer.create(
+    {
+      // This is the `schema` we just created.
+      schema,
+      // These are imported from `graphql`.
+      execute,
+      subscribe,
+    },
+    {
+      // This is the `httpServer` we created in a previous step.
+      server: httpServer,
+      // Pass a different path here if your ApolloServer serves at
+      // a different path.
+      path: '/graphql',
+    }
+  );
 
   const server = new ApolloServer({
-    typeDefs,
-    resolvers,
-    plugins: [ApolloServerPluginDrainHttpServer({ httpServer })],
+    schema,
+    plugins: [
+      ApolloServerPluginDrainHttpServer({ httpServer }),
+      {
+        async serverWillStart() {
+          return {
+            async drainServer() {
+              subscriptionServer.close();
+            },
+          };
+        },
+      },
+    ],
     context: async ({ req }) => {
       const auth = req ? req.headers.authorization : null;
       if (auth && auth.startsWith('Bearer ')) {
@@ -184,6 +229,9 @@ async function startApolloServer(typeDefs, resolvers) {
   // Modified server startup
   await new Promise((resolve) => httpServer.listen({ port: 4000 }, resolve));
   console.log(`🚀 Server ready at http://localhost:4000${server.graphqlPath}`);
+  console.log(
+    `🚀 Subscrition server ready at http://localhost:4000${subscriptionServer.wsServer.options.path}`
+  );
 }
 
 startApolloServer(typeDefs, resolvers);
